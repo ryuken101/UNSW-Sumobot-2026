@@ -1,1 +1,2 @@
 # UNSW-Sumobot-2026
+A wedge shaped sumo robot built for the UNSW Sumobots 2026 Opens stream. It runs fully autonomously on a Raspberry Pi Pico 2 with two ultrasonic sensors, one facing forward and one facing back. Without line sensors there is no direct way to detect the edge of the ring, so the firmware keeps itself safe by only ever driving toward a confirmed target and searching by rotating on the spot.
