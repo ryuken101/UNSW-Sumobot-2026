@@ -18,14 +18,15 @@ The RCWL-1601 runs at 3.3 V logic, so its Echo line connects straight to a Pico 
 
 ## Current progress
 
-The robot is still being built and nothing here has been validated on hardware yet. Development is happening one subsystem at a time. Each subsystem gets a small standalone test script that runs on the bench with the Pico tethered to a laptop over USB, so behaviour can be watched live in the Thonny shell before any of it is combined into the full firmware.
+The robot is still being built and nothing here has been validated on hardware yet. Development happened one subsystem at a time: each subsystem got a small standalone bench test that runs with the Pico tethered to a laptop over USB, so behaviour could be watched live in the Thonny shell. Those pieces are now combined into the full firmware in `main.py`.
 
 | File | What it is | Status |
 |---|---|---|
-| `main.py` | Drivetrain test. Drives each motor forward and reverse, then both together, with the wheels off the ground. | Written, not yet run on hardware |
+| `main.py` | Full autonomous firmware. Search by rotating, approach a confirmed echo, push, and retreat after contact. | Written, not yet run on hardware |
 | `ultrasonictest.py` | Ultrasonic bench test. Reads both sensors and prints live distance and raw pulse timing to the shell. | Written, not yet run on hardware |
+| `motortest.py` | Drivetrain test. Drives each motor forward and reverse to confirm wiring and spin direction. | Written, not yet run on hardware |
 
-The next step after both of these check out is to merge the drive layer and the sonar layer into a single `main.py` state machine that searches by rotating, drives only toward a confirmed echo, and stays inside the ring.
+Two components are not wired yet, so the firmware is written to work without them for now: there are no wheel encoders (odometry is estimated from the sonar instead), and there is no start button (the match auto-starts on Run after a 5 second countdown). Both have a marked place in the code to slot in later. See `handoff-2026-07-28.md` for the full state of the project and what to do next.
 
 ## How the ultrasonic test works
 
@@ -53,14 +54,28 @@ Two details keep the readings honest:
 
 Each cycle the script prints, for both sensors, the raw echo pulse width in microseconds alongside the distance in cm and mm, so both the timing and the converted value are visible at once. The onboard LED blinks once per cycle as a heartbeat.
 
+## How the firmware works
+
+`main.py` runs a state machine. It never drives forward unless it has a confirmed echo in front of it, because the opponent is the only proof of where the ring is. Searching is pure rotation, which cannot walk the bot off the edge.
+
+- **ARMED** waits out the 5 second start delay (rule 1.4.3) with the motors held stopped and the LED blinking.
+- **SEARCH** rotates in place. A valid front echo sends it to APPROACH. An echo only on the rear sensor sends it to REACQUIRE.
+- **REACQUIRE** keeps rotating to bring a target that is behind the bot around to the front.
+- **APPROACH** drives toward the confirmed echo, bounded by that echo's range and by two travel budgets (500 mm per approach, 700 mm net per round) so it stops short rather than overrunning the edge. With no encoders, it reads its own forward travel from how much the sonar range drops, and calibrates its speed estimate live.
+- **ENGAGE** is the close push. A range that stops falling means either a winning push or a dead stall, and without encoders those look identical, so it caps the effort and backs off rather than risk breaking a good push.
+- **COMMIT** is a short blind push for when the target drops into the sensor's dead zone at close range while riding up the wedge.
+- **RETREAT** reverses briefly after any loss of contact, so the bot never comes to rest sitting on the edge, then returns to SEARCH.
+
+The wheels are driven through a soft-start ramp to protect the inline fuse, and the motors are always stopped on exit or on Ctrl-C. There is a safety auto-stop after 30 seconds during bench testing. The full testing procedure, in order, is written into the comment block at the top of `main.py`.
+
 ## How the motor test works
 
-`main.py` is the drivetrain check. With the wheels off the ground it blinks a 3 second warning, then drives motor 1 forward and reverse, motor 2 forward and reverse, and finally both forward together, printing each step. The point is to confirm the wiring and to note which way each wheel actually spins on the forward passes, so the firmware can be told which motors to invert. Any error stops both motors immediately, and the motors are always stopped on exit.
+`motortest.py` is the drivetrain check. With the wheels off the ground it blinks a 3 second warning, then drives motor 1 forward and reverse, motor 2 forward and reverse, and finally both forward together, printing each step. Note which way each wheel actually spins on the forward passes, then set the `INVERT_LEFT` / `INVERT_RIGHT` flags and the left/right motor mapping in `main.py` to match. Any error stops both motors immediately, and the motors are always stopped on exit.
 
 ## Running a test in Thonny
 
 1. Connect the Pico to the laptop with a micro-USB data cable. A charge-only cable is a common cause of an apparently dead board.
-2. Open the test file in Thonny and set the interpreter to MicroPython (Raspberry Pi Pico).
+2. Open the file in Thonny and set the interpreter to MicroPython (Raspberry Pi Pico).
 3. Press Run. Output streams to the shell. Stop with the red Stop button.
 
-Run the motor test with the wheels off the ground, and on battery rather than USB once you move past the bench, since behaviour at a full 11.8 V is not the same as at a sagging 10.9 V.
+Always run the motor test and the first firmware test with the wheels off the ground. Move to battery rather than USB once you are past the bench, since behaviour at a full 11.8 V is not the same as at a sagging 10.9 V. Leave `DEBUG = True` while tethered, but set it to `False` before a real match, since the USB print buffer blocks the loop when no host is attached.
