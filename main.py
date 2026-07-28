@@ -140,10 +140,21 @@ SPEED_MM_S = 300
 # ===========================================================================
 # CONFIG - sonar tuning
 # ===========================================================================
-# Echo timeout. Round trip for 1 m is ~5830 us. Rule 3.4 mandates 1 m of
-# clearance around the ring, so anything past ~1 m is not a target. Keeping
-# this near 1 m is the core of the edge-safety doctrine - do not raise it.
-ECHO_TIMEOUT_US = 6000               # ~1.0 m
+# Echo timeout sets the max detection range. It is capped by the ring's
+# CLEARANCE, not its diameter:
+#   Ring spec: 115 cm black playing surface, 120 cm outer, 2.5 cm white border,
+#   and a mandated 100 cm clearance beyond the ring that is void of objects and
+#   players (exactly so bots do not pick up false sensor data).
+#   From the sensor at the ring edge, the nearest object the rules allow is
+#   ~2.5 cm border + 100 cm clearance ~= 1025 mm away. Capping range at 1.00 m
+#   guarantees that pointing off the table returns NO echo, which the whole
+#   edge-safety doctrine relies on.
+#   Trade-off: an opponent on the far edge of the 115 cm surface (up to
+#   ~1150 mm) may not be seen until search rotation / approach brings them
+#   closer. That is safe - we never move without a front echo - so missing a
+#   far target costs nothing, while a false off-table target costs the match.
+#   Do not raise this above ~1.0 m.  Range mm = ECHO_TIMEOUT_US * MM_PER_US.
+ECHO_TIMEOUT_US = 5830               # ~1.00 m (5830 us * 0.1715 mm/us)
 MM_PER_US       = 0.343 / 2.0        # speed of sound, halved for round trip
 TRIG_US         = 10
 REAR_EVERY      = 3                  # ping rear once every N loops (front is
