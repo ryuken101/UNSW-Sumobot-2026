@@ -25,8 +25,11 @@ The robot is still being built and nothing here has been validated on hardware y
 | `main.py` | Full autonomous firmware. Search by rotating, approach a confirmed echo, push, and retreat after contact. | Written, not yet run on hardware |
 | `ultrasonictest.py` | Ultrasonic bench test. Reads both sensors and prints live distance and raw pulse timing to the shell. | Written, not yet run on hardware |
 | `motortest.py` | Drivetrain test. Drives each motor forward and reverse to confirm wiring and spin direction. | Written, not yet run on hardware |
+| `encodertest.py` | Encoder bench test. Spin each wheel by hand and watch the quadrature count, channel levels, and rate. | Written, not yet run on hardware |
 
-Two components are not wired yet, so the firmware is written to work without them for now: there are no wheel encoders (odometry is estimated from the sonar instead), and there is no start button (the match auto-starts on Run after a 5 second countdown). Both have a marked place in the code to slot in later. See `handoff-2026-07-28.md` for the full state of the project and what to do next.
+The start button on GP4 is wired: nothing runs until you press it, which starts a 5 second delay and then the round. A press during a round is an emergency stop, and after a round the firmware re-arms and waits for the next press. The watchdog is enabled, made safe by a boot escape (hold the button at power-on to drop to the REPL).
+
+The encoders are wired (GP28/27/26/22 via a level shifter) but the firmware does not use them yet. Odometry is still estimated from the sonar range change. Feeding the encoder counts into the odometry is the next step; `encodertest.py` is the tool to verify them first.
 
 ## How the ultrasonic test works
 
@@ -58,7 +61,7 @@ Each cycle the script prints, for both sensors, the raw echo pulse width in micr
 
 `main.py` runs a state machine. It never drives forward unless it has a confirmed echo in front of it, because the opponent is the only proof of where the ring is. Searching is pure rotation, which cannot walk the bot off the edge.
 
-- **ARMED** waits out the 5 second start delay (rule 1.4.3) with the motors held stopped and the LED blinking.
+- **IDLE** holds the motors stopped and blinks slowly, waiting for the GP4 button. A press starts the 5 second delay (rule 1.4.3), then the round. A press during a round is an emergency stop, and after a round it returns here to wait for the next press.
 - **SEARCH** rotates in place. A valid front echo sends it to APPROACH. An echo only on the rear sensor sends it to REACQUIRE.
 - **REACQUIRE** keeps rotating to bring a target that is behind the bot around to the front.
 - **APPROACH** drives toward the confirmed echo, bounded by that echo's range and by two travel budgets (500 mm per approach, 700 mm net per round) so it stops short rather than overrunning the edge. With no encoders, it reads its own forward travel from how much the sonar range drops, and calibrates its speed estimate live.

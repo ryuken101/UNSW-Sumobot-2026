@@ -13,15 +13,17 @@
 # ============================================================================
 # CURRENT HARDWARE STATE (read before running)
 # ============================================================================
-#   - Encoders are NOT wired. Odometry is estimated from the sonar range
-#     change (against a stationary target this equals our own displacement),
-#     with a duty/time fallback while the echo is lost. It is an estimate.
-#   - There is NO start button. The match auto-starts on Run after a 5 second
-#     countdown (satisfies rule 1.4.3), and auto-stops after RUNTIME_CAP_MS.
-#   - There is NO watchdog. That is deliberate: with no button there is no safe
-#     way to break a watchdog boot loop. See the marked spot below to add it
-#     once a button exists. In Thonny, the red Stop button (Ctrl-C) always
-#     stops the bot.
+#   - Start button on GP4 is wired. Nothing runs until you press it: press ->
+#     5 s delay (rule 1.4.3) -> the round runs. A press DURING a round is an
+#     emergency stop. After a round ends it re-arms and waits for the next
+#     press, so you can run round after round without re-running the script.
+#   - The watchdog is ENABLED. If the loop hangs, the board resets. This is
+#     safe because holding the button at power-on drops to the REPL (boot
+#     escape) instead of running - so you can never get stuck in a bad loop.
+#   - Encoders are wired (GP28/27/26/22) but NOT used by this firmware yet.
+#     Odometry is still estimated from the sonar range change, with a duty/time
+#     fallback while the echo is lost. It is an estimate. Encoder integration
+#     is the next step (see encodertest.py and the handoff).
 #
 # ============================================================================
 # WIRING
@@ -31,6 +33,7 @@
 #     Motor 2  ENB=GP18  IN3=GP17  IN4=GP16
 #   Ultrasonic RCWL-1601 (3.3 V logic, no level shifter):
 #     Front  Trig=GP14  Echo=GP15   Rear  Trig=GP12  Echo=GP13
+#   Start button:  GP4 -> switch -> GND  (internal pull-up, pressed reads 0)
 #
 # ============================================================================
 # HOW TO TEST  (do these in order, do not skip ahead)
@@ -41,8 +44,8 @@
 #           sensors read sensible mm and go "no echo" past ~1 m.
 #
 #   TEST 1  WHEELS OFF THE GROUND, USB tethered, motors powered.
-#           Press Run. Watch the shell.
-#           - Confirm the 5 s countdown, LED blinking.
+#           Press Run. The LED blinks slowly = idle, waiting for the button.
+#           - Press the GP4 button. Confirm the fast-blinking 5 s countdown.
 #           - It should enter SEARCH and both wheels should spin so the bot
 #             would rotate in place (one wheel forward, one back).
 #           - Put a hand ~30-50 cm in front of the FRONT sensor. State should
@@ -52,7 +55,11 @@
 #             briefly) then go back to SEARCH.
 #           - Present a target only to the REAR sensor while the front is
 #             empty. It should REACQUIRE (keep rotating to bring it round).
-#           - Confirm it stops itself at 30 s (DONE, LED solid).
+#           - Press the button mid-round: it should E-STOP (motors off, DONE).
+#           - Confirm it stops itself at 30 s if left alone (DONE, LED solid),
+#             then goes back to the slow idle blink waiting for another press.
+#           - Boot escape: hold the button while pressing Run (or on reset).
+#             It should drop straight to the REPL without moving.
 #
 #   TEST 2  Fix direction. On the "forward" push note which way each wheel
 #           actually turns. If a wheel spins backward, flip its INVERT flag
@@ -65,6 +72,11 @@
 #           circle looks safe.
 #
 # WHAT TO LOOK OUT FOR
+#   - If pressing the button does nothing, check GP4 -> switch -> GND and that
+#     idle prints "press the button to start". Pressed must read 0.
+#   - If the board keeps resetting on its own, the loop is starving the
+#     watchdog (WDT_TIMEOUT_MS). Hold the button at boot to escape, then
+#     investigate before re-enabling.
 #   - If a wheel does not move at all, DEADBAND_DUTY may be too low.
 #   - If the bot creeps during the 5 s countdown, a motor is not being held
 #     stopped: check wiring, do not run on the ground.
@@ -73,7 +85,7 @@
 #     print buffer fills and blocks the loop. Set DEBUG = False before a match.
 # ============================================================================
 
-from machine import Pin, PWM, time_pulse_us
+from machine import Pin, PWM, time_pulse_us, WDT
 import time
 
 # ---------------------------------------------------------------------------
@@ -101,6 +113,9 @@ INVERT_RIGHT = False
 # Sonar
 FRONT_TRIG, FRONT_ECHO = 14, 15
 REAR_TRIG,  REAR_ECHO  = 12, 13
+
+# Start button. Wired GP4 -> switch -> GND, internal pull-up, pressed reads 0.
+BUTTON = 4
 
 # ===========================================================================
 # CONFIG - drive tuning   (values marked TUNE need measuring on hardware)
@@ -156,9 +171,14 @@ REACQUIRE_DEG   = 180     # rotation to bring a rear target to the front
 # ===========================================================================
 # CONFIG - match timing
 # ===========================================================================
-T_START_DELAY_MS = 5000   # rule 1.4.3: wait 5 s after the start call
+T_START_DELAY_MS = 5000   # rule 1.4.3: wait 5 s after the button press
 RUNTIME_CAP_MS   = 30000  # bench safety: stop the bot after this. Tunable.
 LOOP_MIN_MS      = 5       # floor on loop period
+DEBOUNCE_MS      = 30      # button debounce
+WDT_TIMEOUT_MS   = 2000    # watchdog resets the board if the loop hangs this
+                           # long. Every loop, including idle and countdown,
+                           # feeds it. Safe now because holding the button at
+                           # boot escapes to the REPL (see run()).
 
 # ===========================================================================
 # Hardware objects
@@ -173,6 +193,16 @@ _in3 = Pin(IN3, Pin.OUT); _in4 = Pin(IN4, Pin.OUT)
 _front_trig = Pin(FRONT_TRIG, Pin.OUT); _front_echo = Pin(FRONT_ECHO, Pin.IN)
 _rear_trig  = Pin(REAR_TRIG,  Pin.OUT); _rear_echo  = Pin(REAR_ECHO,  Pin.IN)
 _front_trig.value(0); _rear_trig.value(0)
+
+_button = Pin(BUTTON, Pin.IN, Pin.PULL_UP)   # pressed == 0
+
+
+def button_down():
+    """Debounced: True while the button is held."""
+    if _button.value() == 0:
+        time.sleep_ms(DEBOUNCE_MS)
+        return _button.value() == 0
+    return False
 
 
 def clamp(x, lo, hi):
@@ -356,20 +386,50 @@ class Bot:
             return "commit"
         return "retreat"
 
-    # -- states -----------------------------------------------------------
-    def st_armed(self):
-        # 5 s start delay (rule 1.4.3). Motors held stopped, LED blinks.
+    # -- start / arming ---------------------------------------------------
+    def idle_wait(self, wdt):
+        # Motors held stopped, LED blinks slowly, wait for a button press.
         self.drive.stop()
-        self.drive.reset_round()
-        log("ARMED: 5 s start delay")
-        t0 = time.ticks_ms()
-        while time.ticks_diff(time.ticks_ms(), t0) < T_START_DELAY_MS:
+        self.drive.tick()
+        # make sure the button is released first (it may still be held from
+        # the press that ended the previous round)
+        while button_down():
+            wdt.feed()
+            time.sleep_ms(10)
+        log("IDLE: press the button to start")
+        while True:
+            wdt.feed()
             self.drive.tick()
             led.toggle()
-            time.sleep_ms(200)
+            if button_down():
+                break
+            time.sleep_ms(80)
         led.value(1)
+        while button_down():          # wait for release
+            wdt.feed()
+            time.sleep_ms(10)
+
+    def countdown(self, wdt):
+        # 5 s start delay (rule 1.4.3). Motors held stopped, LED blinks fast.
+        self.drive.stop()
+        log("START: 5 s delay")
+        t0 = time.ticks_ms()
+        while time.ticks_diff(time.ticks_ms(), t0) < T_START_DELAY_MS:
+            wdt.feed()
+            self.drive.tick()
+            led.toggle()
+            time.sleep_ms(150)
+        led.value(1)
+
+    def arm_round(self):
+        # fresh round: clear the round budget and start searching
+        self.drive.reset_round()
+        self.last_front = -1
+        self.prev_front = -1
         self.t_round = time.ticks_ms()
         self.new_search()
+
+    # -- states -----------------------------------------------------------
 
     def new_search(self):
         # alternate rotation direction each time we return to searching so we
@@ -514,16 +574,29 @@ class Bot:
     def st_done(self):
         self.drive.stop()
 
-    # -- main loop --------------------------------------------------------
+    # -- top level --------------------------------------------------------
     def run(self):
-        # ---- add a watchdog HERE once a start/boot-escape button exists ----
-        # from machine import WDT
-        # if _button.value() == 0: raise SystemExit("safe boot")
-        # wdt = WDT(timeout=2000)
-        # --------------------------------------------------------------------
-        self.st_armed()
+        # Boot escape: hold the button at power-on / reset to drop to the REPL
+        # instead of running. This is what makes enabling the watchdog safe -
+        # there is always a way out of a bad autorun loop.
+        if button_down():
+            led.value(1)
+            raise SystemExit("safe boot - button held at start")
 
+        wdt = WDT(timeout=WDT_TIMEOUT_MS)
+
+        # One pass per round: wait for a press, 5 s delay, run, then re-arm.
         while True:
+            self.idle_wait(wdt)
+            self.countdown(wdt)
+            self.arm_round()
+            self.match_loop(wdt)
+
+    def match_loop(self, wdt):
+        # Runs one round until DONE (30 s cap or a button e-stop), then returns
+        # to run() which loops back to idle_wait for the next press.
+        while True:
+            wdt.feed()
             self.loop_n += 1
 
             # sensing: front every loop, rear occasionally
@@ -531,6 +604,11 @@ class Bot:
             self.note_front(self.front)
             if self.loop_n % REAR_EVERY == 0:
                 self.rear = read_rear()
+
+            # emergency stop: a press during the round ends it
+            if self.state != DONE and button_down():
+                log("E-STOP: button pressed")
+                self.enter(DONE)
 
             # safety auto-stop
             if self.state != DONE and \
